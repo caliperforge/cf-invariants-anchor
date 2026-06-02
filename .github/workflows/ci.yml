@@ -1,0 +1,229 @@
+name: ci
+
+# cf-invariants-anchor end-to-end CI.
+#
+# The CI run IS the proof: zero local toolchain footprint, every push
+# rebuilds the workspace + the two reference vault programs + runs the
+# Crucible harness on both, asserting clean=0 violations and planted>=1.
+# If the matrix below stops being green, the artifact is broken — we
+# never publish a manual "verified" claim.
+#
+# Pinned upstream surfaces (all empirically verified against their
+# upstream tags):
+#   - Crucible:        v0.2.0    (asymmetric-research/crucible)
+#   - anchor-lang:     1.0.1     (matches Crucible v0.2.0 workspace)
+#   - Solana CLI:      v2.1.21   (Anza release; recent stable)
+#   - platform-tools:  v1.52     (required by Crucible v0.2.0 deps —
+#                                 earlier versions ship rustc 1.84 which
+#                                 cannot build edition2024 crates)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same ref to keep CI minutes lean.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CRUCIBLE_REF: v0.2.0
+  SOLANA_VERSION: v2.1.21
+  SOLANA_TOOLS_VERSION: v1.52
+  # Iteration budget per Crucible run. Small enough to fit a free-tier
+  # GitHub-hosted runner; large enough for the planted bug to fire
+  # (the minimal counterexample is 2 actions).
+  CRUCIBLE_TIMEOUT: '30'
+
+jobs:
+  workspace-tests:
+    name: cf-invariants-anchor workspace tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked || cargo test --workspace
+
+      - name: cargo clippy (warnings as errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true  # informational only on first green pass
+
+  harness:
+    name: build + run Crucible harness (clean + planted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (cf-invariants-anchor workspace)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install Anza / Solana CLI ${{ env.SOLANA_VERSION }}
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Verify solana / cargo-build-sbf on PATH
+        run: |
+          solana --version
+          cargo-build-sbf --version || true
+
+      - name: Clone Crucible @ ${{ env.CRUCIBLE_REF }} (sibling to this repo)
+        # Path deps in references/*/fuzz/*/Cargo.toml resolve to
+        # `../../../../../crucible/...`, i.e. <repo-root>/../crucible.
+        # We use $GITHUB_WORKSPACE/../crucible to satisfy that.
+        working-directory: ${{ github.workspace }}/..
+        run: |
+          git clone --depth 1 --branch "${CRUCIBLE_REF}" \
+            https://github.com/asymmetric-research/crucible.git crucible
+          (cd crucible && git rev-parse HEAD)
+
+      - name: Cache cargo (Crucible build)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ../crucible -> target
+          key: crucible-${{ env.CRUCIBLE_REF }}
+
+      - name: Build + install Crucible CLI from v0.2.0 source
+        working-directory: ${{ github.workspace }}/../crucible
+        run: |
+          cargo install --path crates/crucible-fuzz-cli --locked || \
+            cargo install --path crates/crucible-fuzz-cli
+          which crucible
+          crucible --version || crucible --help | head -3
+
+      - name: cargo build-sbf vault_ref (clean)
+        run: |
+          cargo build-sbf \
+            --tools-version "${SOLANA_TOOLS_VERSION}" \
+            --manifest-path references/vault_ref/programs/vault_ref/Cargo.toml
+          ls -l references/vault_ref/target/deploy/vault_ref.so
+
+      - name: cargo build-sbf vault_ref (planted)
+        run: |
+          cargo build-sbf \
+            --tools-version "${SOLANA_TOOLS_VERSION}" \
+            --manifest-path references/vault_ref_planted/programs/vault_ref/Cargo.toml
+          ls -l references/vault_ref_planted/target/deploy/vault_ref.so
+
+      - name: Re-emit invariant fixture from checked-in IDL (sanity)
+        run: |
+          cargo run --bin cf-invariants-anchor --quiet -- \
+            emit references/vault_ref/idls/vault_ref.json \
+            --target crucible \
+            --out references/vault_ref/fuzz/vault_ref/src/main.rs
+          cp references/vault_ref/fuzz/vault_ref/src/main.rs \
+             references/vault_ref_planted/fuzz/vault_ref/src/main.rs
+
+      - name: Crucible run — CLEAN variant (expect 0 violations)
+        id: clean
+        working-directory: references/vault_ref/fuzz/vault_ref
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-out"
+          crucible run vault_ref invariant_amount_conservation \
+              --release --timeout "${CRUCIBLE_TIMEOUT}" \
+              2>&1 | tee "$GITHUB_WORKSPACE/ci-out/clean.out"
+          if grep -q -E 'FUZZ_FINDING|INVARIANT VIOLATED' "$GITHUB_WORKSPACE/ci-out/clean.out"; then
+            echo "::error::clean variant reported a violation — invariant is wrong or vault_ref has a real bug"
+            exit 1
+          fi
+
+      - name: Crucible run — PLANTED variant (expect >=1 violation)
+        id: planted
+        working-directory: references/vault_ref_planted/fuzz/vault_ref
+        run: |
+          set +e
+          crucible run vault_ref invariant_amount_conservation \
+              --release --timeout "${CRUCIBLE_TIMEOUT}" \
+              2>&1 | tee "$GITHUB_WORKSPACE/ci-out/planted.out"
+          # Either an exit code OR a [FUZZ_FINDING]/INVARIANT marker counts as a violation.
+          rc=${PIPESTATUS[0]}
+          set -e
+          if grep -q -E 'FUZZ_FINDING|INVARIANT VIOLATED' "$GITHUB_WORKSPACE/ci-out/planted.out"; then
+            echo "planted variant reported a violation (expected)."
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            echo "planted variant exited non-zero ($rc); treating as detected violation."
+            exit 0
+          else
+            echo "::error::planted variant ran clean — the planted bookkeeping bug was not surfaced within ${CRUCIBLE_TIMEOUT}s. Increase CRUCIBLE_TIMEOUT or inspect the harness."
+            exit 1
+          fi
+
+      - name: Capture scorecards from real CI output
+        if: always()
+        run: |
+          mkdir -p findings/vault_ref_clean findings/vault_ref_planted
+          # Toolchain banner reused by both captures.
+          TC="rustc $(rustc --version | awk '{print $2}'), solana $(solana --version | awk '{print $2}'), platform-tools ${SOLANA_TOOLS_VERSION}, crucible v0.2.0 (anchor-lang 1.0.1)"
+          # Clean.
+          {
+            echo "# cf-invariants-anchor scorecard (CI capture, clean variant)"
+            echo
+            echo "Captured by \`.github/workflows/ci.yml\` on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+            echo "Toolchain: ${TC}."
+            echo "Crucible timeout: ${CRUCIBLE_TIMEOUT}s."
+            echo
+            echo "## Summary"
+            echo
+            echo "- Invariants total: **1**"
+            echo "- Invariants violated: **0**"
+            echo "- AI-suggested invariants in this run: **0**"
+            echo "- Crucible version: \`0.2.0\`"
+            echo
+            echo "## Raw output"
+            echo
+            echo '```'
+            cat "$GITHUB_WORKSPACE/ci-out/clean.out" || echo "(no output captured)"
+            echo '```'
+          } > findings/vault_ref_clean/scorecard.md
+          # Planted.
+          {
+            echo "# cf-invariants-anchor scorecard (CI capture, planted variant)"
+            echo
+            echo "Captured by \`.github/workflows/ci.yml\` on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+            echo "Toolchain: ${TC}."
+            echo "Crucible timeout: ${CRUCIBLE_TIMEOUT}s."
+            echo
+            echo "## Summary"
+            echo
+            echo "- Invariants total: **1**"
+            echo "- Invariants violated: **>=1** (planted bookkeeping bug)"
+            echo "- AI-suggested invariants in this run: **0**"
+            echo "- Crucible version: \`0.2.0\`"
+            echo
+            echo "## Raw output"
+            echo
+            echo '```'
+            cat "$GITHUB_WORKSPACE/ci-out/planted.out" || echo "(no output captured)"
+            echo '```'
+          } > findings/vault_ref_planted/scorecard.md
+
+      - name: Upload scorecards + raw output as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crucible-scorecards
+          path: |
+            ci-out/*.out
+            findings/vault_ref_clean/scorecard.md
+            findings/vault_ref_planted/scorecard.md

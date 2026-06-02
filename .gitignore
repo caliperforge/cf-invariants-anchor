@@ -1,0 +1,7 @@
+target/
+Cargo.lock.bak
+.cf-invariants-anchor/ai-log/
+*.log
+.DS_Store
+node_modules/
+_handoff/

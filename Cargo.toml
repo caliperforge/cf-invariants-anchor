@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cf-invariants-anchor-cli",
+    "crates/cf-invariants-anchor-core",
+    "crates/cf-invariants-anchor-idl",
+    "crates/cf-invariants-anchor-suggest",
+    "crates/cf-invariants-anchor-emit",
+    "crates/cf-invariants-anchor-report",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.79"
+license = "Apache-2.0"
+repository = "https://github.com/caliperforge/cf-invariants-anchor"
+authors = ["CaliperForge <team@caliperforge.com>"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }

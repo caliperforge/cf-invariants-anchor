@@ -1,0 +1,13 @@
+[package]
+name = "cf-invariants-anchor-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Render cf-invariants-anchor scorecards (markdown + JSON), mirroring cf-invariants (Cairo)."
+
+[dependencies]
+cf-invariants-anchor-core = { path = "../cf-invariants-anchor-core" }
+serde_json = { workspace = true }

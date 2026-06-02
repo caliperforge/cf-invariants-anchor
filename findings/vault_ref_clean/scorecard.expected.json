@@ -1,0 +1,8 @@
+{
+  "invariants_total": 1,
+  "invariants_violated": 0,
+  "ai_suggestions_included": 0,
+  "runtime_ms": 1800,
+  "crucible_version": "0.2.0",
+  "counterexamples": []
+}

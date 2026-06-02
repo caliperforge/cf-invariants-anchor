@@ -1,0 +1,222 @@
+# cf-invariants-anchor
+
+[![ci](https://github.com/caliperforge/cf-invariants-anchor/actions/workflows/ci.yml/badge.svg)](https://github.com/caliperforge/cf-invariants-anchor/actions/workflows/ci.yml)
+
+**The AI invariant-author for [Crucible](https://github.com/asymmetric-research/crucible) and [Trident](https://github.com/Ackee-Blockchain/trident) on Solana / Anchor.**
+
+cf-invariants-anchor is a *sidecar* to the two open invariant-fuzzing
+harnesses for Solana programs:
+
+- **Crucible** (Asymmetric Research, MIT, LibAFL + LiteSVM, v0.2.0) — primary emit target.
+- **Trident** (Ackee Blockchain, MIT) — secondary emit target (staged for Phase 1).
+
+We **do not rebuild the harness**. Crucible and Trident already own
+the LiteSVM execution rails and the IDL-driven program-fuzzing
+plumbing. The unclaimed quadrant — and the only thing this crate
+ships — is the **AI-suggested invariant author** that sits on top
+of them: ingest an Anchor IDL, propose ranked candidate invariants
+from a class library (balance conservation in Phase 0; monotonicity,
+access-control, oracle-freshness on the roadmap), and emit a
+ready-to-run `#[fuzz_fixture]` + `#[invariant_test]` source file
+for Crucible.
+
+This package is the Anchor sibling of the Cairo-targeted
+[cf-invariants](../cf-invariants/) (Starknet / snforge) shipped by
+the same operator.
+
+---
+
+## Status
+
+**Phase 0 — working artifact, pre-1.0.**
+
+> **Source of truth: the CI badge above.** GitHub Actions builds the
+> workspace, builds both vault reference programs via `cargo build-sbf`,
+> and runs the Crucible v0.2.0 harness on both on every push — asserting
+> 0 violations on the clean variant and ≥1 violation on the planted
+> variant. The captured scorecards from each run are uploaded as a CI
+> artifact and committed into `findings/vault_ref_{clean,planted}/scorecard.md`
+> once green. The `.expected.{json,md}` siblings remain as the authored
+> reference; the unsuffixed files are the real captures.
+>
+> No "verified" claim in this repo is made by hand — if the badge is red,
+> the artifact is not green. See
+> [`findings/LIVE_VALIDATION_PENDING.md`](./findings/LIVE_VALIDATION_PENDING.md)
+> for the version-pin fix record (2026-06-01: `anchor-lang` repinned to
+> `1.0.1` to match Crucible v0.2.0; CI authored to prove it in the cloud,
+> not on the operator's host).
+
+What is live in this build:
+
+- `cf-invariants-anchor ingest <idl>` — parses Anchor 0.30 / Codama-style
+  IDL JSON into a typed contract surface (program id, instructions,
+  scalar balance-bearing fields per stored account).
+- `cf-invariants-anchor suggest <idl>` — produces a ranked list of
+  candidate invariants. Phase 0 ships **one** class:
+  `balance_conservation`. The `InvariantClass` trait + `ClassRegistry`
+  are extensible so adding monotonicity / access-control / oracle-
+  freshness is a one-file change.
+- `cf-invariants-anchor emit <idl> --target crucible` — renders a
+  Crucible-compatible fuzz fixture (`#[fuzz_fixture]` impl + a
+  `#[invariant_test]` function using `fuzz_assert_eq!`), with a
+  fixture-side ledger walked through every `action_*` arm.
+- `--target trident` — Phase-1 stub. Emit returns an explanatory
+  placeholder so the CLI surface is reachable without the Trident
+  rendering being wired.
+- **Reference contract pair** at `references/vault_ref/` and
+  `references/vault_ref_planted/`. The planted variant carries a
+  deliberate off-by-one on the conservation surface: `withdraw`
+  transfers `amount` lamports but decrements `vault.amount` by
+  `amount-1`. The emitted invariant catches the drift in 1 withdraw.
+- **Scorecard renderer** with the AI-disclosure banner emitted
+  whenever `ai_suggestions_included > 0` (Phase-0 reference runs
+  use the heuristic source, so the banner is dormant on the
+  reference scorecards — the renderer pathway is exercised by tests).
+- Workspace test suite (11 tests, `cargo test --workspace`).
+
+## What it is not
+
+- **Not a fork of Crucible or Trident.** Both ship as upstream
+  dependencies; cf-invariants-anchor only authors invariants.
+- **Not a formal-verification tool.** Randomized invariant search,
+  not proofs.
+- **Not a replacement for hand-authored invariants.** AI / heuristic
+  candidates are always labeled `UNVERIFIED` until the contract
+  author accepts them.
+
+---
+
+## Architecture
+
+`cf-invariants-anchor` is a Cargo workspace of five Rust crates:
+
+```
+crates/
+  cf-invariants-anchor-cli/      # binary
+  cf-invariants-anchor-core/     # shared types: ContractSurface, InvariantCandidate, Scorecard
+  cf-invariants-anchor-idl/      # Anchor IDL parser → ContractSurface
+  cf-invariants-anchor-suggest/  # ClassRegistry + balance_conservation suggester
+  cf-invariants-anchor-emit/     # Render to Crucible / Trident-stub source
+  cf-invariants-anchor-report/   # Scorecard markdown + JSON renderer
+references/
+  vault_ref/                     # clean Anchor vault (conservation should hold)
+  vault_ref_planted/             # off-by-one on withdraw bookkeeping
+findings/
+  vault_ref_clean/               # scorecard.expected.{json,md}
+  vault_ref_planted/             # scorecard.expected.{json,md} with counterexample
+docs/
+  architecture.md                # design, emit-target abstraction, Crucible API record
+  ai-disclosure.md               # AI involvement, disclosure path, audit log
+scripts/
+  run_phase0_harness.sh          # reproduce-from-clone driver
+prompts/
+  invariant_suggestion_v1.txt    # versioned prompt (Phase 1 AI path)
+```
+
+## Pinned toolchain
+
+These are the versions CI builds against on every push (see
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)). All version
+pins were empirically verified against the upstream tag's `Cargo.toml`,
+not eyeballed from code shape:
+
+- Rust **stable** (workspace MSRV: `1.79`).
+- `anchor-lang` **1.0.1** — matches Crucible v0.2.0's workspace
+  (`asymmetric-research/crucible @ v0.2.0` pins `anchor-lang = "1.0.1"`).
+- Anza / Solana CLI **v2.1.21** for `cargo-build-sbf`.
+- Solana platform-tools **v1.52** (Crucible v0.2.0 deps require
+  edition2024 support; earlier platform-tools ship rustc 1.84 which
+  cannot build them — passed as `--tools-version v1.52`).
+- Upstream Crucible **v0.2.0** built from source in CI
+  (`cargo install --path crates/crucible-fuzz-cli`).
+
+The fuzz `Cargo.toml`s reference Crucible via path dep at
+`../../../../../crucible/crates/crucible-fuzzer` — CI clones Crucible
+to `<repo-root>/../crucible` so this resolves. For local reproduction
+either clone Crucible to that path, or vendor the two crates and edit
+the fuzz Cargo.tomls.
+
+See [`.tool-versions`](./.tool-versions) (informational; CI is authoritative).
+
+## Install
+
+```sh
+cargo install --path crates/cf-invariants-anchor-cli
+```
+
+## Quick start
+
+```sh
+# Ingest an Anchor IDL.
+cf-invariants-anchor ingest references/vault_ref/idls/vault_ref.json
+
+# Ask the suggester for ranked candidate invariants.
+cf-invariants-anchor suggest references/vault_ref/idls/vault_ref.json
+
+# Emit a Crucible #[fuzz_fixture] + #[invariant_test] file.
+cf-invariants-anchor emit references/vault_ref/idls/vault_ref.json \
+  --target crucible \
+  --out references/vault_ref/fuzz/vault_ref/src/main.rs
+```
+
+## End-to-end Phase 0 demo
+
+CI runs exactly this every push; local reproduction is optional. See
+[`scripts/run_phase0_harness.sh`](./scripts/run_phase0_harness.sh) for
+the canonical driver.
+
+```sh
+# 1. Build the clean reference program + its planted twin (SBPF).
+cargo build-sbf --tools-version v1.52 \
+  --manifest-path references/vault_ref/programs/vault_ref/Cargo.toml
+cargo build-sbf --tools-version v1.52 \
+  --manifest-path references/vault_ref_planted/programs/vault_ref/Cargo.toml
+
+# 2. Emit the conservation invariant (already pre-emitted in this repo).
+cf-invariants-anchor emit references/vault_ref/idls/vault_ref.json \
+  --target crucible \
+  --out references/vault_ref/fuzz/vault_ref/src/main.rs
+cp references/vault_ref/fuzz/vault_ref/src/main.rs \
+   references/vault_ref_planted/fuzz/vault_ref/src/main.rs
+
+# 3. Run Crucible against both variants (timeout small enough for CI;
+#    the planted bug's minimal counterexample is 2 actions and fires fast).
+(cd references/vault_ref/fuzz/vault_ref && \
+  crucible run vault_ref invariant_amount_conservation --release --timeout 30)
+(cd references/vault_ref_planted/fuzz/vault_ref && \
+  crucible run vault_ref invariant_amount_conservation --release --timeout 30)
+```
+
+The CI workflow captures the real output of these runs into
+`findings/vault_ref_{clean,planted}/scorecard.md` and uploads them as
+the `crucible-scorecards` artifact. The `scorecard.expected.{json,md}`
+siblings remain as authored reference for diffing.
+
+## Roadmap
+
+| Phase | Surface |
+|-------|---------|
+| **0 (this build)** | IDL ingest → ranked balance-conservation candidates → Crucible emit → scorecard renderer. Heuristic suggester only (no AI call). |
+| 1 | AI-suggested invariants (Anthropic Claude Sonnet path, mirroring cf-invariants Cairo: mock transport default, live behind env flag). Trident emit target. Monotonicity + access-control classes. |
+| 2 | Oracle-freshness class. CI scorecard-drift early warning. Shrinking. |
+| 3 | Multi-account-state surface (full account-mutability-set analysis instead of name-heuristic). |
+
+## Reporting issues, security contact
+
+Open an issue on the GitHub repository, or contact
+[team@caliperforge.com](mailto:team@caliperforge.com).
+
+For sensitive security disclosures touching cf-invariants-anchor itself,
+contact [michael@caliperforge.com](mailto:michael@caliperforge.com) directly.
+
+## License
+
+Apache-2.0. See `LICENSE`.
+
+---
+
+cf-invariants-anchor is operated by Michael Moffett under the CaliperForge banner. CaliperForge is a sole-operator engineering studio.
+
+Built with AI assistance. Authored and reviewed by Michael Moffett, operator at CaliperForge. Full policy at [caliperforge.com/ai-disclosure](https://caliperforge.com/ai-disclosure). See [`docs/ai-disclosure.md`](./docs/ai-disclosure.md) for the in-repo detail on what the AI module does, the audit-log path, and how to disable it.
+
+Contact: michael@caliperforge.com (founder), team@caliperforge.com (org).

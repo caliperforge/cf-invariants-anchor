@@ -1,0 +1,23 @@
+[package]
+name = "cf-invariants-anchor-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "cf-invariants-anchor CLI: ingest Anchor IDL, suggest invariants, emit Crucible-compatible fuzz fixtures."
+
+[[bin]]
+name = "cf-invariants-anchor"
+path = "src/main.rs"
+
+[dependencies]
+cf-invariants-anchor-core    = { path = "../cf-invariants-anchor-core" }
+cf-invariants-anchor-idl     = { path = "../cf-invariants-anchor-idl" }
+cf-invariants-anchor-suggest = { path = "../cf-invariants-anchor-suggest" }
+cf-invariants-anchor-emit    = { path = "../cf-invariants-anchor-emit" }
+cf-invariants-anchor-report  = { path = "../cf-invariants-anchor-report" }
+serde_json = { workspace = true }
+clap       = { workspace = true }
+anyhow     = { workspace = true }

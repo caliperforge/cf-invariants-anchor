@@ -1,0 +1,21 @@
+{
+  "invariants_total": 1,
+  "invariants_violated": 1,
+  "ai_suggestions_included": 0,
+  "runtime_ms": 2100,
+  "crucible_version": "0.2.0",
+  "counterexamples": [
+    {
+      "invariant_name": "invariant_amount_conservation",
+      "seed": "0x76617546",
+      "failing_sequence": "INVARIANT VIOLATED invariant_amount_conservation\non_chain: 500\nexpected: 499\ndelta: +1\nsequence: [action_deposit(500), action_withdraw(1)]",
+      "witness": {
+        "on_chain_amount": 500,
+        "expected_amount": 499,
+        "delta": 1,
+        "withdraws_observed": 1,
+        "explanation": "Withdraw of 1 lamport: on-chain bookkeeping subtracts (amount-1)=0; fixture-side ledger subtracts amount=1. Real lamports still moved by 1. Per-withdraw drift = +1."
+      }
+    }
+  ]
+}
